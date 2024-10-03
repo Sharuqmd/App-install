@@ -1,7 +1,9 @@
+# Configure remote state storage
 terraform {
   backend "s3" {
-    bucket = "mybucket"
+    bucket = "mine-terraform-bucket"
     key    = "terraform/terraform.tfstate"
-    region = "us-east-1"
+    region = "ap-south-1"
+    dynamodb_table = "terraform-entry-table"
   }
 }
