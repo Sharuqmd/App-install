@@ -1,14 +1,15 @@
 # Specify the provider
 provider "aws" {
-  region = var.region
+  region = "ap-south-1"
 }
 
 # Configure remote state storage
 terraform {
   backend "s3" {
-    bucket = var.s3_bucket
-    key    = "terraform/${terraform.workspace}/terraform.tfstate"
-    region = var.region
+    bucket = "mine-terraform-bucket"
+    key    = "terraform/terraform.tfstate"
+    region = "ap-south-1"
+    dynamodb_table = "terraform-entry-table"
   }
 }
 
@@ -16,91 +17,83 @@ terraform {
 locals {
   cluster_name = "${var.cluster_name}-${terraform.workspace}"
 }
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "5.7.0"
 
-# Create a VPC resource
-resource "aws_vpc" "main_vpc" {
-  cidr_block = "10.0.0.0/16"
+  name                 = "eks-vpc"
+  cidr                 = "10.0.0.0/16"
+  private_subnets      = ["10.0.1.0/24", "10.0.2.0/24"]
+  public_subnets       = ["10.0.4.0/24", "10.0.5.0/24"]
+  azs = ["ap-south-1a", "ap-south-1b"] 
+
+  private_subnet_names = ["private-subnet-1", "private-subnet-2"]
+  enable_nat_gateway   = true
+  single_nat_gateway   = true
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+
   tags = {
-    Name = "main-vpc-${terraform.workspace}"
+    name = "vpc"
   }
 }
-
-# Create Subnets
-resource "aws_subnet" "public_subnet" {
-  vpc_id     = aws_vpc.main_vpc.id
-  cidr_block = "10.0.1.0/24"
-  availability_zone = data.aws_availability_zones.available.names[0]
-  tags = {
-    Name = "public-subnet-${terraform.workspace}"
-  }
+resource "aws_security_group" "all_worker_mgmt" {
+  name_prefix = "all_worker_management"
+  vpc_id      = module.vpc.vpc_id
 }
 
-resource "aws_subnet" "private_subnet" {
-  vpc_id     = aws_vpc.main_vpc.id
-  cidr_block = "10.0.2.0/24"
-  availability_zone = data.aws_availability_zones.available.names[1]
-  tags = {
-    Name = "private-subnet-${terraform.workspace}"
-  }
-}
-
-# Data source to fetch the availability zones dynamically
-data "aws_availability_zones" "available" {}
-
-# Create Security Group
-resource "aws_security_group" "eks_sg" {
-  vpc_id = aws_vpc.main_vpc.id
-  description = "EKS Security Group"
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
-
-# Use a module for creating EKS
-module "eks" {
-  source = "terraform-aws-modules/eks/aws"
-  cluster_name = local.cluster_name
-  cluster_version = var.k8s_version
-  subnets = [
-    aws_subnet.public_subnet.id,
-    aws_subnet.private_subnet.id
+resource "aws_security_group_rule" "all_worker_mgmt_ingress" {
+  description       = "allow inbound traffic from eks"
+  from_port         = 0
+  protocol          = "-1"
+  to_port           = 0
+  security_group_id = aws_security_group.all_worker_mgmt.id
+  type              = "ingress"
+  cidr_blocks = [
+   "0.0.0.0/0"
   ]
-  vpc_id = aws_vpc.main_vpc.id
-  node_groups = {
-    eks_nodes = {
-      desired_capacity = 2
-      max_capacity     = 3
-      min_capacity     = 1
-      instance_type    = "t3.medium"
+}
+
+resource "aws_security_group_rule" "all_worker_mgmt_egress" {
+  description       = "allow outbound traffic to anywhere"
+  from_port         = 0
+  protocol          = "-1"
+  security_group_id = aws_security_group.all_worker_mgmt.id
+  to_port           = 0
+  type              = "egress"
+  cidr_blocks       = ["0.0.0.0/0"]
+}
+
+module "eks" {
+  source          = "terraform-aws-modules/eks/aws"
+  version         = "20.8.4"
+  cluster_name    = "eks-my-cluster-${terraform.workspace}" 
+  cluster_version = "1.30"
+  subnet_ids      = module.vpc.private_subnets
+
+  enable_irsa = true
+  cluster_endpoint_public_access  = true  
+
+
+  tags = {
+    cluster = "my-cluster"
+  }
+
+  vpc_id = module.vpc.vpc_id
+
+  eks_managed_node_group_defaults = {
+    ami_type               = "AL2_x86_64"
+    instance_types         = ["t3.medium"]
+    vpc_security_group_ids = [aws_security_group.all_worker_mgmt.id]
+  }
+
+  eks_managed_node_groups = {
+
+    node_group = {
+      min_size     = 2
+      max_size     = 6
+      desired_size = 2
     }
   }
-
-  # Enable logging only for production
-  enable_logging = terraform.workspace == "prod" ? true : false
-}
-
-# Provisioners example: Command to be executed after EKS cluster creation
-resource "null_resource" "run_commands" {
-  provisioner "local-exec" {
-    command = "echo EKS cluster ${module.eks.cluster_name} created in ${var.region}"
-  }
-}
-
-# Output block to show details
-output "eks_endpoint" {
-  description = "The EKS Cluster endpoint"
-  value       = module.eks.cluster_endpoint
-}
-
-output "kubectl_config_command" {
-  description = "Command to configure kubectl for this EKS cluster"
-  value       = "aws eks --region ${var.region} update-kubeconfig --name ${local.cluster_name}"
-}
-
-output "eks_cluster_name" {
-  description = "The name of the EKS cluster"
-  value       = module.eks.cluster_id
+  
 }
