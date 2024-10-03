@@ -3,16 +3,6 @@ provider "aws" {
   region = "ap-south-1"
 }
 
-# Configure remote state storage
-terraform {
-  backend "s3" {
-    bucket = "mine-terraform-bucket"
-    key    = "terraform/terraform.tfstate"
-    region = "ap-south-1"
-    dynamodb_table = "terraform-entry-table"
-  }
-}
-
 # Dynamically set the cluster name using workspaces
 locals {
   cluster_name = "${var.cluster_name}-${terraform.workspace}"
